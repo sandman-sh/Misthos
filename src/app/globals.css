@@ -1,26 +1,118 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #FFFFFF;
+  --surface: #F6F7F4;
+  --surface-elevated: #ECEEEA;
+  --surface-border: #E2E5DE;
+  --foreground: #171914;
+  --foreground-muted: #686D62;
+  
+  --accent: #A3D928;
+  --accent-hover: #8FC118;
+  --accent-foreground: #11120F;
+  --accent-subtle: #EEF7D2;
+  --accent-border: #8CBC1E;
+  
+  --success: #15803D;
+  --success-bg: #F0FDF4;
+  --success-border: #BBF7D0;
+  
+  --warning: #B45309;
+  --warning-bg: #FFFBEB;
+  --warning-border: #FDE68A;
+  
+  --danger: #B91C1C;
+  --danger-bg: #FEF2F2;
+  --danger-border: #FECACA;
+
+  --card-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.05), 0 1px 2px -1px rgba(0, 0, 0, 0.05);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+.dark {
+  --background: #11120F;
+  --surface: #1A1C18;
+  --surface-elevated: #22251F;
+  --surface-border: #2D3129;
+  --foreground: #F7F8F4;
+  --foreground-muted: #9DA395;
+  
+  --accent: #A8DE2E;
+  --accent-hover: #92C71C;
+  --accent-foreground: #11120F;
+  --accent-subtle: rgba(168, 222, 46, 0.14);
+  --accent-border: rgba(168, 222, 46, 0.4);
+  
+  --success: #4ADE80;
+  --success-bg: rgba(74, 222, 128, 0.1);
+  --success-border: rgba(74, 222, 128, 0.25);
+  
+  --warning: #FBBF24;
+  --warning-bg: rgba(251, 191, 36, 0.1);
+  --warning-border: rgba(251, 191, 36, 0.25);
+  
+  --danger: #F87171;
+  --danger-bg: rgba(248, 113, 113, 0.1);
+  --danger-border: rgba(248, 113, 113, 0.25);
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --card-shadow: 0 4px 12px 0 rgba(0, 0, 0, 0.4);
 }
 
 body {
-  background: var(--background);
+  background-color: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Custom fintech styling utilities */
+.btn-primary {
+  background-color: var(--accent);
+  color: var(--accent-foreground);
+  font-weight: 600;
+  transition: all 0.15s ease-in-out;
+}
+.btn-primary:hover {
+  background-color: var(--accent-hover);
+}
+
+.btn-secondary {
+  background-color: var(--surface);
+  color: var(--foreground);
+  border: 1px solid var(--surface-border);
+  transition: all 0.15s ease-in-out;
+}
+.btn-secondary:hover {
+  background-color: var(--surface-elevated);
+}
+
+.card-misthos {
+  background-color: var(--surface);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--card-shadow);
+  border-radius: 0.75rem;
+}
+
+.card-elevated {
+  background-color: var(--surface-elevated);
+  border: 1px solid var(--surface-border);
+  box-shadow: var(--card-shadow);
+  border-radius: 0.75rem;
+}
+
+/* Custom scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-border);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--foreground-muted);
 }

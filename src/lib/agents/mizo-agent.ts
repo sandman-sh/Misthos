@@ -2,8 +2,9 @@
 // Misthos database and oracle pipeline, driven by the configured LLM.
 
 import crypto from 'crypto';
+import { ethers } from 'ethers';
 import db from '@/lib/db';
-import { formatUSDC, getExplorerTxUrl } from '@/lib/arc-config';
+import { formatUSDC, getExplorerTxUrl, parseUSDC } from '@/lib/arc-config';
 import { evaluateDeliverable } from '@/lib/agents/evaluator-agent';
 import { executeTreasuryReview } from '@/lib/agents/treasury-agent';
 import { resolveLlmConfig, llmChat, extractJson } from '@/lib/llm';
@@ -29,7 +30,11 @@ AVAILABLE TOOLS (respond with JSON {"tool": name, "args": {...}, "reply": string
 4. run_verification {"milestone_id": string} - Execute the dual-agent oracle pipeline on the latest submission of a milestone. Returns verdict, confidence, and whether a signed EIP-712 attestation was issued.
 5. explain_verdict {"milestone_id": string} - Explain the latest verification report for a milestone in plain terms, including remediation.
 6. get_transactions {} - Recent settlement/funding transactions with Arcscan links.
-7. answer {} - Pure conversational answer about Misthos, Arc, escrow, or the user's data (use "reply" only).
+7. create_contract {"title": string, "contractor_address": string, "description": string, "milestones": [{"title": string, "amount": string, "acceptance_criteria": string, "allow_resubmission": boolean}]} - Create an escrow agreement. This never moves funds.
+8. set_resubmission_policy {"milestone_id": string, "allowed": boolean} - Enable or disable repeated submissions.
+9. prepare_funding {"contract_id": string} - Prepare wallet approval for escrow funding.
+10. prepare_settlement {"milestone_id": string} - Prepare wallet approval for a verified payout.
+11. answer {} - Pure conversational answer about Misthos, Arc, escrow, or the user's data (use "reply" only).
 
 RULES:
 - Always return valid JSON only: {"tool": "...", "args": {...}, "reply": "..."}
@@ -37,7 +42,53 @@ RULES:
 - If the user asks to verify/check/review a deliverable, use run_verification.
 - If unsure which milestone/contract, call list_pending_verifications or get_portfolio first.
 - Never invent transaction hashes or verdicts. Only report what tools return.
+- Never claim funds moved without a user-supplied transaction hash. Funding and settlement require explicit wallet approval.
 `;
+
+function toolCreateContract(userId: string, args: any): any {
+  const title = String(args.title || '').trim();
+  const contractorAddress = String(args.contractor_address || '').trim();
+  const milestones = Array.isArray(args.milestones) ? args.milestones : [];
+  if (!title || !ethers.isAddress(contractorAddress) || milestones.length === 0) return { error: 'A title, valid contractor address, and at least one milestone are required.' };
+  let total = BigInt(0);
+  const normalized = milestones.map((m: any) => {
+    const amount = parseUSDC(String(m.amount || '0'));
+    if (amount <= BigInt(0)) throw new Error(`Milestone "${m.title || 'Untitled'}" must have a positive amount.`);
+    total += amount;
+    return { title: String(m.title || 'Milestone').trim(), amount, criteria: String(m.acceptance_criteria || 'Deliverable satisfies the agreed requirements.'), allow: m.allow_resubmission !== false };
+  });
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  const contractor = contractorAddress.toLowerCase();
+  const clientAddress = ((db.prepare('SELECT wallet_address FROM users WHERE id = ?').get(userId) as any)?.wallet_address || ethers.ZeroAddress).toLowerCase();
+  const contractorUser = db.prepare('SELECT id FROM users WHERE LOWER(wallet_address) = ?').get(contractor) as { id: string } | undefined;
+  db.transaction(() => {
+    db.prepare(`INSERT INTO contracts (id,title,description,project_brief,client_id,client_address,contractor_id,contractor_address,total_amount,funded_amount,status,escrow_contract_address,onchain_escrow_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(id, title, String(args.description || ''), '', userId, clientAddress, contractorUser?.id || null, contractor, total.toString(), '0', 'AWAITING_FUNDING', '', ethers.id(id), now, now);
+    normalized.forEach((m: any, index: number) => db.prepare(`INSERT INTO milestones (id,contract_id,order_index,title,description,amount,due_date,deliverable_type,acceptance_criteria,verification_policy,evidence_requirements,status,allow_resubmission,funded_amount,paid_amount,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(crypto.randomUUID(), id, index, m.title, '', m.amount.toString(), null, 'GITHUB_PR', m.criteria, 'Dual-agent evaluation with EIP-712 cryptographic oracle attestation.', 'GitHub PR URL, commit SHA, and test report.', 'PENDING', m.allow ? 1 : 0, '0', '0', now, now));
+    db.prepare(`INSERT INTO audit_events (id,entity_type,entity_id,actor_id,action,metadata,timestamp) VALUES (?,?,?,?,?,?,?)`).run(crypto.randomUUID(), 'CONTRACT', id, userId, 'MIZO_CREATE_CONTRACT', JSON.stringify({ title, milestoneCount: normalized.length }), now);
+  })();
+  return { contractId: id, title, totalUSDC: formatUSDC(total.toString()), status: 'AWAITING_FUNDING', nextStep: 'Approve escrow funding from the connected wallet.' };
+}
+
+function toolSetResubmissionPolicy(userId: string, milestoneId: string, allowed: boolean): any {
+  const row = db.prepare(`SELECT m.id FROM milestones m JOIN contracts c ON c.id = m.contract_id WHERE m.id = ? AND c.client_id = ?`).get(milestoneId, userId) as any;
+  if (!row) return { error: 'Milestone not found or only the creator can change this policy.' };
+  db.prepare('UPDATE milestones SET allow_resubmission = ?, updated_at = ? WHERE id = ?').run(allowed ? 1 : 0, Date.now(), milestoneId);
+  return { milestoneId, resubmissionsAllowed: allowed };
+}
+
+function toolPrepareFunding(userId: string, contractId: string): any {
+  const c = db.prepare('SELECT id,title,total_amount FROM contracts WHERE id = ? AND client_id = ?').get(contractId, userId) as any;
+  if (!c) return { error: 'Contract not found or only the creator can fund it.' };
+  return { requiresWalletApproval: true, action: 'FUND_ESCROW', contractId: c.id, title: c.title, amountUSDC: formatUSDC(c.total_amount), message: 'Review and approve the escrow funding transaction in the connected wallet.' };
+}
+
+function toolPrepareSettlement(userId: string, milestoneId: string): any {
+  const m = db.prepare(`SELECT m.id,m.title,m.amount,m.status,c.title as contract_title FROM milestones m JOIN contracts c ON c.id=m.contract_id WHERE m.id=? AND c.client_id=?`).get(milestoneId, userId) as any;
+  if (!m) return { error: 'Milestone not found or only the creator can settle it.' };
+  if (m.status !== 'VERIFIED') return { error: `Milestone is ${m.status}; only VERIFIED milestones can be settled.` };
+  return { requiresWalletApproval: true, action: 'SETTLE_MILESTONE', milestoneId: m.id, title: m.title, contract: m.contract_title, amountUSDC: formatUSDC(m.amount), message: 'Review and approve the payout transaction in the connected wallet.' };
+}
 
 function toolGetPortfolio(userId: string): any {
   const contracts = db.prepare(`
@@ -118,6 +169,9 @@ async function toolRunVerification(userId: string, milestoneId: string): Promise
   `).get(milestoneId, userId, userId) as any;
 
   if (!milestone) return { error: 'Milestone not found or access denied.' };
+  if (milestone.client_id !== userId && milestone.client_address?.toLowerCase() !== ((db.prepare('SELECT wallet_address FROM users WHERE id = ?').get(userId) as any)?.wallet_address || '').toLowerCase()) {
+    return { error: 'Only the creator can run oracle verification.' };
+  }
 
   const submission = db.prepare(`
     SELECT * FROM submissions WHERE milestone_id = ? ORDER BY submitted_at DESC LIMIT 1
@@ -261,6 +315,22 @@ async function executeTool(userId: string, tool: string, args: any): Promise<{ r
     case 'get_transactions': {
       const r = toolGetTransactions(userId);
       return { result: r, action: { type: 'transactions', summary: `${r.length} recent transactions`, data: { transactions: r } } };
+    }
+    case 'create_contract': {
+      const r = toolCreateContract(userId, args);
+      return { result: r, action: { type: 'contract_created', summary: r.error ? 'Contract creation failed' : `Created contract: ${r.title}`, data: r } };
+    }
+    case 'set_resubmission_policy': {
+      const r = toolSetResubmissionPolicy(userId, args.milestone_id || '', args.allowed !== false);
+      return { result: r, action: { type: 'resubmission_policy', summary: r.error ? 'Policy update failed' : 'Updated resubmission policy', data: r } };
+    }
+    case 'prepare_funding': {
+      const r = toolPrepareFunding(userId, args.contract_id || '');
+      return { result: r, action: { type: 'wallet_action', summary: r.error ? 'Funding preparation failed' : 'Wallet approval required for funding', data: r } };
+    }
+    case 'prepare_settlement': {
+      const r = toolPrepareSettlement(userId, args.milestone_id || '');
+      return { result: r, action: { type: 'wallet_action', summary: r.error ? 'Settlement preparation failed' : 'Wallet approval required for settlement', data: r } };
     }
     default:
       return { result: { note: 'conversational' }, action: { type: 'answer', summary: 'Answered directly' } };
